@@ -18,4 +18,4 @@ Route::middleware('auth:api')->get('/user', function (Request $request) {
 });
 
 
-Route::middleware('api')->get('/test', 'ApiController@index');
+Route::middleware('api')->get('/getTariff', 'ApiController@getTariff');
