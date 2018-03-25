@@ -9,6 +9,7 @@ use App\Tariff\Api\PriceTypeEnum;
 use App\Tariff\Api\Stage;
 use App\Tariff\Api\Tariff;
 use App\Tariff\Model\CarToType;
+use App\Tariff\Model\PriceLimitation;
 use App\Tariff\Model\PriceLimitationRelation;
 use App\Tariff\Model\PriceLimitType;
 use App\Tariff\Model\PriceType;
@@ -25,58 +26,154 @@ class ApiController extends Controller
 
     public function getTariff(Request $request)
     {
-        $userId = (int)$request->get('userId');
-        $carId = (int)$request->get('carId');
-        $stageMinutesLeft = (int)$request->get('stageMinutesLeft');
-        $stageDistanceLeft = (int)$request->get('stageDistanceLeft');
-        $requestStageCode = trim((string)$request->get('stageCode'));
-        $timestamp = (int)$request->get('timestamp');
-        $timestampNow = new \DateTime();
-        if ($timestamp > 0) {
-            $timestampNow->setTimestamp($timestamp);
-        }
-        $timestampStart = new \DateTime('today');
-        $minutes = (int)(($timestampNow->getTimestamp() - $timestampStart->getTimestamp()) / 60);
+        try {
+            $userId = (int)$request->get('userId');
+            if ($userId <= 0) {
+                throw new \InvalidArgumentException('Неверный идентификатор пользователя');
+            }
+            $carId = (int)$request->get('carId');
+            if ($carId <= 0) {
+                throw new \InvalidArgumentException('Неверный идентификатор автомобиля');
+            }
+            $stageMinutesLeft = (int)$request->get('stageMinutesLeft');
+            $stageDistanceLeft = (int)$request->get('stageDistanceLeft');
+            $requestStageCode = trim((string)$request->get('stageCode'));
+            $timestamp = (int)$request->get('timestamp');
+            $timestampNow = new \DateTime();
+            if ($timestamp > 0) {
+                $timestampNow->setTimestamp($timestamp);
+            }
+            $timestampStart = new \DateTime('today');
+            $minutes = (int)(($timestampNow->getTimestamp() - $timestampStart->getTimestamp()) / 60);
 
-        //Stages
-        $requestStageId = 0;
-        if ($requestStageCode) {
-            $dbStageList = \App\Tariff\Model\Stage::where('code', $requestStageCode)
-                ->orderBy('id', 'asc')
-                ->get();
-            $requestStageId = $dbStageList->first()->id;
-        } else {
-            $dbStageList = \App\Tariff\Model\Stage::all();
-        }
-        $stageList = [];
-        foreach ($dbStageList as $dbStage) {
-            $stageList[] = [
-                'id' => $dbStage->id,
-                'name' => $dbStage->name,
-                'code' => $dbStage->code,
+            //Stages
+            $requestStageId = 0;
+            if ($requestStageCode) {
+                $dbStageList = (new \App\Tariff\Model\Stage)->where('code', $requestStageCode)
+                    ->orderBy('id', 'asc')
+                    ->get();
+                $requestStageId = $dbStageList->first()->id;
+            } else {
+                $dbStageList = \App\Tariff\Model\Stage::all();
+            }
+
+            //UserTypes
+            $userTypeList = [];
+            $dbUserTypeList = $this->getUserTypeIdList($userId);
+            foreach ($dbUserTypeList as $dbUserType) {
+                $userTypeList[] = $dbUserType->user_type_id;
+            }
+
+            //carTypes
+            $carTypeList = [];
+            $dbCarTypeList = $this->getDbCarTypeList($carId);
+            foreach ($dbCarTypeList as $dbCarType) {
+                $carTypeList[] = $dbCarType->id;
+            }
+
+            //tariffIds
+            $dbTariffIdList = $this->getDbTariffRelationCollection($dbUserTypeList, $dbUserTypeList, $requestStageId);
+            $tariffRelationList = [];
+            foreach ($dbTariffIdList as $dbTariff) {
+                $tariffRelationList[$dbTariff->tariff_id][] = (int)$dbTariff->stage_id;
+            }
+
+            //tariff
+            $tariffKeyRelationList = [];
+            $dbTariffList = $this->getDbTariffCollection($dbTariffIdList, $minutes, $stageMinutesLeft, $stageDistanceLeft);
+
+            foreach ($dbTariffList as $dbTariff) {
+                $tmpStage = [];
+                foreach ($tariffRelationList[$dbTariff->id] as $stageId) {
+                    if (!in_array($stageId, $tmpStage)) {
+                        $key = $dbTariff->minute_start . '-' . $dbTariff->minute_end . '-' . $dbTariff->distance_start . '-' . $dbTariff->distance_end;
+                        $tariffKeyRelationList[$stageId][$key][] = $dbTariff;
+                        $tmpStage[] = $stageId;
+                    }
+                }
+            }
+
+
+            //priceLimitationIds
+            $priceLimitationIdList = [];
+            $priceLimitationRelationIdList = [];
+            $dbPriceLimitationIdList = $this->getDbPriceLimitationRelationCollection($dbUserTypeList, $dbCarTypeList, $requestStageId);
+            foreach ($dbPriceLimitationIdList as $dbPriceLimitation) {
+                $priceLimitationIdList[] = $dbPriceLimitation->price_limitation_id;
+                $priceLimitationRelationIdList[(int)$dbPriceLimitation->stage_id][] = $dbPriceLimitation;
+            }
+
+            //priceLimitations
+            $priceLimitationList = [];
+            $dbPriceLimitationList = $this->getDbPriceLimitationCollection($dbPriceLimitationIdList);
+            foreach ($dbPriceLimitationList as $dbPriceLimitation) {
+                $priceLimitationList[(int)$dbPriceLimitation->id] = $dbPriceLimitation;
+            }
+
+            //Генерация ответа Rest API
+            return [
+                'status' => 1,
+                'stageList' => $this->getRestApiStageList(
+                    $dbStageList,
+                    $dbTariffList,
+                    $dbTariffIdList,
+                    $priceLimitationRelationIdList,
+                    $priceLimitationList
+                ),
+                'priceLimitList' => $this->getRestApiPriceLimitList(
+                    $priceLimitationRelationIdList,
+                    $priceLimitationList
+                )
+            ];
+        } catch (\Exception $exception) {
+            return [
+                'status' => 0,
+                'message' => $exception->getMessage()
             ];
         }
+    }
 
-        //UserTypes
-        $userTypeList = [];
-        $dbUserTypeList = UserToType::where('user_id', $userId)
+    /**
+     * @param int $userId
+     * @return \Illuminate\Database\Eloquent\Collection|static[]
+     */
+    private function getUserTypeIdList($userId)
+    {
+        return (new UserToType())
+            ->where('user_id', $userId)
             ->orderBy('id', 'asc')
             ->get();
+    }
+
+    /**
+     * @param int $carId
+     * @return \Illuminate\Database\Eloquent\Collection|static[]
+     */
+    private function getDbCarTypeList($carId)
+    {
+        return (new CarToType)
+            ->where('car_id', $carId)
+            ->orderBy('id', 'asc')
+            ->get();
+    }
+
+    /**
+     * @param $dbUserTypeList
+     * @param $dbCarTypeList
+     * @param $requestStageId
+     * @return \Illuminate\Database\Eloquent\Collection|static[]
+     */
+    private function getDbTariffRelationCollection($dbUserTypeList, $dbCarTypeList, $requestStageId)
+    {
+        $userTypeList = [];
         foreach ($dbUserTypeList as $dbUserType) {
             $userTypeList[] = $dbUserType->user_type_id;
         }
-
-        //carTypes
         $carTypeList = [];
-        $dbCarTypeList = CarToType::where('car_id', $carId)
-            ->orderBy('id', 'asc')
-            ->get();
         foreach ($dbCarTypeList as $dbCarType) {
             $carTypeList[] = $dbCarType->id;
         }
 
-        //tariffIds
-        $tariffRelationList = [];
         $dbTeriff = new TariffRelation();
         $dbTeriff
             ->whereIn('user_type_id', $userTypeList)
@@ -84,24 +181,30 @@ class ApiController extends Controller
         if ($requestStageId > 0) {
             $dbTeriff->where('stage_id', [0, $requestStageId]);
         }
-        $dbTariffIdList = $dbTeriff
+        return $dbTeriff
             ->orderBy('id', 'asc')
             ->get();
+    }
+
+    /**
+     * @param $dbTariffIdList
+     * @param $minutes
+     * @param $stageMinutesLeft
+     * @param $stageDistanceLeft
+     * @return \Illuminate\Database\Eloquent\Collection|static[]
+     */
+    private function getDbTariffCollection($dbTariffIdList, $minutes, $stageMinutesLeft, $stageDistanceLeft)
+    {
+        $tariffRelationList = [];
         foreach ($dbTariffIdList as $dbTariff) {
-            $tariffRelationList[$dbTariff->tariff_id][] = (int)$dbTariff->stage_id;
+            $tariffRelationList[] = (int)$dbTariff->tariff_id;
         }
 
-        //tariff
-        $tariffKeyRelationList = [];
-        //@todo добавить minute_start filter
-        //@todo добавить minute_end filter
-        //@todo добавить distance_start filter
-        //@todo добавить distance_end filter
-        $dbTariff = new \App\Tariff\Model\Tariff();
+        $dbTariff = \DB::table('tariffs');
         $dbTariff
-            ->whereIn('id', array_keys($tariffRelationList))
-            ->where('time_start', '<', $minutes)
-            ->where('time_end', '>', $minutes);
+            ->whereIn('id', $tariffRelationList)
+            ->whereRaw('time_start <= ' . $minutes)
+            ->whereRaw('time_end >= ' . $minutes);
         if ($stageMinutesLeft > 0) {
             $dbTariff
                 ->where('minute_start', '<=', $stageMinutesLeft)
@@ -113,10 +216,95 @@ class ApiController extends Controller
                 ->where('distance_end', '>=', $stageDistanceLeft);
 
         }
-        $dbTariffList = $dbTariff
+        return $dbTariff
             ->orderBy('id', 'asc')
             ->get();
+    }
 
+    /**
+     * @param $dbUserTypeList
+     * @param $dbCarTypeList
+     * @param $requestStageId
+     * @return \Illuminate\Database\Eloquent\Collection|static[]
+     */
+    private function getDbPriceLimitationRelationCollection($dbUserTypeList, $dbCarTypeList, $requestStageId)
+    {
+        $userTypeList = [];
+        foreach ($dbUserTypeList as $dbUserType) {
+            $userTypeList[] = $dbUserType->user_type_id;
+        }
+        $carTypeList = [];
+        foreach ($dbCarTypeList as $dbCarType) {
+            $carTypeList[] = $dbCarType->id;
+        }
+
+        $dbPriceLimitationRelation = new PriceLimitationRelation();
+        $dbPriceLimitationRelation
+            ->whereIn('user_type_id', $userTypeList)
+            ->whereIn('car_type_id', $carTypeList);
+
+        if ($requestStageId > 0) {
+            $dbPriceLimitationRelation->where('stage_id', [0, $requestStageId]);
+        }
+
+        return $dbPriceLimitationRelation
+            ->orderBy('id', 'asc')
+            ->get();
+    }
+
+    /**
+     * @param $dbPriceLimitationIdList
+     * @return \Illuminate\Database\Eloquent\Collection|static[]
+     */
+    private function getDbPriceLimitationCollection($dbPriceLimitationIdList)
+    {
+        $priceLimitationIdList = [];
+        foreach ($dbPriceLimitationIdList as $dbPriceLimitation) {
+            $priceLimitationIdList[] = $dbPriceLimitation->price_limitation_id;
+        }
+        return (new PriceLimitation())->whereIn('id', $priceLimitationIdList)
+            ->orderBy('id', 'asc')
+            ->get();
+    }
+
+    /**
+     * @return array
+     */
+    private function getPriceTypeList()
+    {
+        $priceTypeList = [];
+        $dbPriceTypeList = PriceType::all();
+        foreach ($dbPriceTypeList as $item) {
+            $priceTypeList[$item->id] = $item;
+        }
+        return $priceTypeList;
+    }
+
+    /**
+     * @return array
+     */
+    private function getPriceLimitTypeList()
+    {
+        static $priceLimitTypeList = [];
+
+        if (empty($priceLimitTypeList)) {
+            $dbPriceLimitTypeList = PriceLimitType::all();
+            foreach ($dbPriceLimitTypeList as $dbPriceLimitType) {
+                $priceLimitTypeList[$dbPriceLimitType->id] = $dbPriceLimitType;
+            }
+        }
+        return $priceLimitTypeList;
+    }
+
+    private function getRestApiStageList($dbStageList, $dbTariffList, $dbTariffIdList, $priceLimitationRelationIdList, $priceLimitationList)
+    {
+        $priceTypeList = $this->getPriceTypeList();
+        $priceLimitTypeList = $this->getPriceLimitTypeList();
+
+        $tariffRelationList = [];
+        foreach ($dbTariffIdList as $dbTariff) {
+            $tariffRelationList[$dbTariff->tariff_id][] = (int)$dbTariff->stage_id;
+        }
         foreach ($dbTariffList as $dbTariff) {
             $tmpStage = [];
             foreach ($tariffRelationList[$dbTariff->id] as $stageId) {
@@ -128,48 +316,6 @@ class ApiController extends Controller
             }
         }
 
-
-        //priceLimitationIds
-        $priceLimitationIdList = [];
-        $priceLimitationRelationIdList = [];
-        $dbPriceLimitationRelation = new PriceLimitationRelation();
-        $dbPriceLimitationRelation
-            ->whereIn('user_type_id', $userTypeList)
-            ->whereIn('car_type_id', $carTypeList);
-
-        if ($requestStageId > 0) {
-            $dbPriceLimitationRelation->where('stage_id', [0,$requestStageId]);
-        }
-
-        $dbPriceLimitationIdList = $dbPriceLimitationRelation
-            ->orderBy('id', 'asc')
-            ->get();
-        foreach ($dbPriceLimitationIdList as $dbPriceLimitation) {
-            $priceLimitationIdList[] = $dbPriceLimitation->price_limitation_id;
-            $priceLimitationRelationIdList[(int)$dbPriceLimitation->stage_id][] = $dbPriceLimitation;
-        }
-
-        //priceLimitations
-        $priceLimitationList = [];
-        $dbPriceLimitationList = \App\Tariff\Model\PriceLimitation::whereIn('id', $priceLimitationIdList)
-            ->orderBy('id', 'asc')
-            ->get();
-        foreach ($dbPriceLimitationList as $dbPriceLimitation) {
-            $priceLimitationList[(int)$dbPriceLimitation->id] = $dbPriceLimitation;
-        }
-
-        $priceTypeList = [];
-        $dbPriceTypeList = PriceType::all();
-        foreach ($dbPriceTypeList as $item) {
-            $priceTypeList[$item->id] = $item;
-        }
-        $priceLimitTypeList = [];
-        $dbPriceLimitTypeList = PriceLimitType::all();
-        foreach ($dbPriceLimitTypeList as $dbPriceLimitType) {
-            $priceLimitTypeList[$dbPriceLimitType->id] = $dbPriceLimitType;
-        }
-
-        //Генерация ответа Rest API
         $stageList = [];
         foreach ($dbStageList as $dbStage) {
             $tariffs = [];
@@ -223,7 +369,17 @@ class ApiController extends Controller
                 $priceLimits
             );
         }
+        return $stageList;
+    }
 
+    /**
+     * @param $priceLimitationRelationIdList
+     * @param $priceLimitationList
+     * @return array
+     */
+    private function getRestApiPriceLimitList($priceLimitationRelationIdList, $priceLimitationList)
+    {
+        $priceLimitTypeList = $this->getPriceLimitTypeList();
         $priceLimitList = [];
         if (!empty($priceLimitationRelationIdList[0])) {
             foreach ($priceLimitationRelationIdList[0] as $priceLimitationRelation) {
@@ -236,12 +392,6 @@ class ApiController extends Controller
                 );
             }
         }
-
-        return [
-            'stageList' => $stageList,
-            'priceLimitList' => $priceLimitList,
-            'userId' => $request->get('userId'),
-            'time' => $timestampNow,
-        ];
+        return $priceLimitList;
     }
 }
