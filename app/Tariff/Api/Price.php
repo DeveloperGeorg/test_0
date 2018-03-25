@@ -59,7 +59,7 @@ class Price implements \JsonSerializable
      */
     public function getPriceMinute()
     {
-        $price = $this->priceOnce;
+        $price = $this->priceMinute;
         foreach ($this->extraPriceList as $extraPrice) {
             $price += $extraPrice->getPriceMinute();
         }
@@ -71,7 +71,7 @@ class Price implements \JsonSerializable
      */
     public function getPriceDistance()
     {
-        $price = $this->priceOnce;
+        $price = $this->priceDistance;
         foreach ($this->extraPriceList as $extraPrice) {
             $price += $extraPrice->getPriceDistance();
         }
